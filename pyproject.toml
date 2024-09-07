@@ -6,6 +6,15 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.8.2",
+    "colorama>=0.4.6",
+    "types-colorama>=0.4.15.20240311",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.6.4",
+    "mypy>=1.11.2",
+    "pytest-asyncio>=0.24.0",
 ]
 
 [build-system]
