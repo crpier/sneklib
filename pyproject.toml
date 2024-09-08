@@ -15,8 +15,12 @@ dev = [
     "ruff>=0.6.4",
     "mypy>=1.11.2",
     "pytest-asyncio>=0.24.0",
+    "deadcode>=2.4.1",
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.mypy]
+enable_incomplete_feature = ["NewGenericSyntax"]
