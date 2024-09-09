@@ -64,4 +64,34 @@ def child_fixture_is_torn_down():
     assert child_fixture_torn_down is True
 
 
+@fixture()
+def sample_fixture():
+    # This is a test-scoped fixture
+    value = "fixture value"
+    yield value
+    # Cleanup code (if needed) goes here
+
+
+@test(1, 2)
+@test(2, 3)
+@test(3, 4)
+def test_simple_params(a: int, b: int):
+    assert a + b == a + b
+
+
+@test([1, 2, 3], 7)
+@test([2, 3, 4], 10)
+def test_params_and_fixtures(lst: list[int], expected_sum: int):
+    root_value = load_fixture(load_root_fixture)
+    assert sum(lst) + root_value == expected_sum
+
+
+@test()
+def test_with_fixture():
+    fixture_value = load_fixture(sample_fixture)
+    assert (
+        fixture_value == "fixture value"
+    ), f"Expected 'fixture value', but got '{fixture_value}'"
+
+
 test_runner.run_tests()
