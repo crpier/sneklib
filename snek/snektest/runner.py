@@ -22,20 +22,47 @@ FixtureScope = Literal["test", "session"]
 
 class FixtureConfig(TypedDict):
     scope: FixtureScope
+    params: list[tuple]
 
 
 T = TypeVar("T")
 P = ParamSpec("P")
 type Generator[T] = _Generator[T, None, None]
 
-_defined_fixtures: dict[str, FixtureConfig] = {}
+_fixture_configs: dict[str, FixtureConfig] = {}
 
 
 def load_fixture(fixture: Callable[..., _Generator[T, None, None]]) -> T:
-    generator = fixture()
-    if _defined_fixtures[fixture.__name__]["scope"] == "test":
+    fixture_data = _fixture_configs[fixture.__name__]
+    test_name = test_runner._get_fixture_context()
+    if test_name is None:
+        msg = f"Could not find test for fixture {fixture.__name__}"
+        raise ValueError(msg)
+    if fixture.__name__ not in test_runner._test_fixtures_calls[test_name]:
+        test_runner._test_fixtures_calls[test_name][fixture.__name__] = 0
+    try:
+        generator = fixture(
+            *fixture_data["params"][
+                test_runner._test_fixtures_calls[test_name][fixture.__name__]
+            ]
+        )
+    except IndexError:
+        generator = fixture(*fixture_data["params"][0])
+
+    # that's so ugly I'm ashamed of myself
+    test_runner._test_fixtures_calls[test_name][fixture.__name__] += 1
+    if (
+        len(fixture_data["params"])
+        - test_runner._test_fixtures_calls[test_name][fixture.__name__]
+        > 0
+    ):
+        test_name = test_runner._get_fixture_context()
+        if test_name is not None and test_name in test_runner._tests:
+            tests_to_duplicate = test_runner._tests[test_name]
+            test_runner._tests[test_name].extend(tests_to_duplicate)
+    if _fixture_configs[fixture.__name__]["scope"] == "test":
         test_runner._add_test_fixture(fixture, generator)
-    elif _defined_fixtures[fixture.__name__]["scope"] == "session":
+    elif _fixture_configs[fixture.__name__]["scope"] == "session":
         # TODO: session scope fixtures
         pass
     return next(generator)
@@ -57,9 +84,18 @@ def test(
     return decorator
 
 
-def fixture(scope: FixtureScope = "test"):
-    def decorator(func: Callable[[], Generator[T]]):
-        _defined_fixtures[func.__name__] = {"scope": scope}
+def fixture(*params: Unpack[T2], scope: FixtureScope = "test"):
+    def decorator(func: Callable[..., Generator[T]]):
+        if (fixture_config := _fixture_configs.get(func.__name__)) is None:
+            _fixture_configs[func.__name__] = {
+                "scope": scope,
+                "params": [params],
+            }
+        else:
+            if fixture_config.get("params") is None:
+                _fixture_configs[func.__name__]["params"] = [params]
+            else:
+                _fixture_configs[func.__name__]["params"].append(params)
         return func
 
     return decorator
@@ -71,11 +107,22 @@ class TestRunner:
         self._test_fixtures_generators: Dict[
             str, Dict[str, _Generator[Any, None, None]]
         ] = defaultdict(dict)
+        self._test_fixtures_calls: Dict[str, Dict[str, int]] = defaultdict(dict)
 
     def _add_test(self, new_test: Callable[..., None], params: Any) -> None:
         if new_test.__name__ not in self._tests:
             self._tests[new_test.__name__] = []
         self._tests[new_test.__name__].append((new_test, params))
+
+    def _get_fixture_context(self) -> str | None:
+        """Return the current test name"""
+        # walk up the stack until we find load_fixture
+        # the frame before that is the test that called it
+        test_name: str | None = None
+        for idx, frame in enumerate(traceback.extract_stack()):
+            if frame.name == "load_fixture":
+                test_name = traceback.extract_stack()[idx - 1].name
+        return test_name
 
     def _add_test_fixture(
         self,
@@ -83,12 +130,7 @@ class TestRunner:
         generator: _Generator[T, None, None],
     ) -> None:
         fixture_name = fixture.__name__
-        # walk up the stack until we find load_fixture
-        # the frame before that is the test that called it
-        test_name: str | None = None
-        for idx, frame in enumerate(traceback.extract_stack()):
-            if frame.name == "load_fixture":
-                test_name = traceback.extract_stack()[idx - 1].name
+        test_name = self._get_fixture_context()
 
         if test_name is None:
             msg = f"Could not find test for fixture {fixture_name}"
@@ -109,9 +151,9 @@ class TestRunner:
                 except AssertionError:
                     status = TestStatus.failed
                     message = traceback.format_exc()
-                except Exception as e:
+                except Exception:
                     status = TestStatus.failed
-                    message = f"Unexpected error: {e!s}"
+                    message = f"Unexpected error: {traceback.format_exc()}"
 
                 if test_name in self._test_fixtures_generators:
                     for fixture_name, generator in self._test_fixtures_generators[
@@ -136,6 +178,8 @@ class TestRunner:
                     status=status,
                     message=message if status == TestStatus.failed else "Test passed",
                 )
+            self._test_fixtures_calls = defaultdict(dict)
+            self._test_fixtures_generators = defaultdict(dict)
         show_results(test_results)
 
 

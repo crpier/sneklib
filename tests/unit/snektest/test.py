@@ -94,4 +94,16 @@ def test_with_fixture():
     ), f"Expected 'fixture value', but got '{fixture_value}'"
 
 
+@fixture(1, 2, 3, scope="test")
+@fixture(3, 2, 1, scope="test")
+def my_parametrized_fixture(a: int, b: int, c: int):
+    yield a + b + c
+
+
+@test()
+def test_with_parametrized_fixture():
+    result = load_fixture(my_parametrized_fixture)
+    assert result == 6
+
+
 test_runner.run_tests()
