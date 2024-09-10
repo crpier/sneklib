@@ -1,9 +1,11 @@
-from snek.snektest.runner import fixture, load_fixture, test, test_runner
+from snek.snektest.runner import fixture, load_fixture, test, test_session
 
 root_fixture_started_up = False
 root_fixture_torn_down = False
 child_fixture_started_up = False
 child_fixture_torn_down = False
+
+# TODO: also test that fixture setup and teardowns are called only once
 
 
 @fixture()
@@ -66,10 +68,8 @@ def child_fixture_is_torn_down():
 
 @fixture()
 def sample_fixture():
-    # This is a test-scoped fixture
     value = "fixture value"
     yield value
-    # Cleanup code (if needed) goes here
 
 
 @test(1, 2)
@@ -106,4 +106,4 @@ def test_with_parametrized_fixture():
     assert result == 6
 
 
-test_runner.run_tests()
+test_session.run_tests()
