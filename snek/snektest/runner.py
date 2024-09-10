@@ -136,6 +136,12 @@ class RegisteredTestsContainer:
     def __iter__(self) -> Iterator[RegisteredTest]:
         return iter(self.registered_tests.values())
 
+    def get_by_function(self, func: Callable) -> RegisteredTest | None:
+        return self.registered_tests.get(func)
+
+    def get_by_function_strict(self, func: Callable) -> RegisteredTest:
+        return self.registered_tests[func]
+
 
 class TestSession:
     def __init__(self):
@@ -155,9 +161,14 @@ class TestSession:
     ):
         self.fixtures.register_fixture(func, fixture_params, scope)
 
-    def run_tests(self) -> None:
+    def run_tests(self, tests: list[Callable] | None = None) -> None:
         test_results: dict[str, TestResult] = {}
-        for test in self.tests:
+        if tests is None:
+            tests_to_run = self.tests
+        else:
+            tests_to_run = [self.tests.get_by_function_strict(func) for func in tests]
+
+        for test in tests_to_run:
             global test_runner
             test_runner = TestRunner(
                 fixtures=self.fixtures,
@@ -248,6 +259,7 @@ class TestRunner:
     def run_test_instance(
         self, test_func: Callable, test_params: tuple[Any]
     ) -> Tuple[TestStatus, str]:
+        # TODO: only print this when -v is passed
         try:
             test_func(*test_params)
             status, message = TestStatus.passed, "Test passed"
@@ -257,6 +269,17 @@ class TestRunner:
             status, message = (
                 TestStatus.failed,
                 f"Unexpected error: {traceback.format_exc()}",
+            )
+        pretty_started_up_fixtures = [
+            f"{func.__name__}={started_fixture.last_result}"
+            for func, started_fixture in self.started_up_fixtures.items()
+        ]
+        pretty_started_up_fixtures = ", ".join(pretty_started_up_fixtures)
+        if test_params == ():
+            print(f"{self.test_name} with {pretty_started_up_fixtures or "no fixtures"}")
+        else:
+            print(
+                f"{self.test_name} on {test_params} with {pretty_started_up_fixtures or "no fixtures"}"
             )
         message += self._teardown_test_fixtures(self.test_name)
         return status, message

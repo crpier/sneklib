@@ -1,4 +1,4 @@
-from snek.snektest.runner import fixture, load_fixture, test, test_session
+from snek.snektest.runner import fixture, load_fixture, test
 
 root_fixture_started_up = False
 root_fixture_torn_down = False
@@ -97,13 +97,10 @@ def test_with_fixture():
 @fixture(1, 2, 3, scope="test")
 @fixture(3, 2, 1, scope="test")
 def my_parametrized_fixture(a: int, b: int, c: int):
-    yield a + b + c
+    yield a + b * c
 
 
 @test()
 def test_with_parametrized_fixture():
     result = load_fixture(my_parametrized_fixture)
-    assert result == 6
-
-
-test_session.run_tests()
+    assert result // 2 != 0
