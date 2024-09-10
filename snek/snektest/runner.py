@@ -276,7 +276,9 @@ class TestRunner:
         ]
         pretty_started_up_fixtures = ", ".join(pretty_started_up_fixtures)
         if test_params == ():
-            print(f"{self.test_name} with {pretty_started_up_fixtures or "no fixtures"}")
+            print(
+                f"{self.test_name} with {pretty_started_up_fixtures or "no fixtures"}"
+            )
         else:
             print(
                 f"{self.test_name} on {test_params} with {pretty_started_up_fixtures or "no fixtures"}"
@@ -320,7 +322,9 @@ def load_fixture(fixture: Callable[..., _Generator[T, None, None]]) -> T:
     return test_runner.load_fixture(fixture)
 
 
-def test(*params: Unpack[T2]) -> Callable[[Callable[..., None]], Callable[..., None]]:
+def test(
+    *params: Unpack[T2],
+) -> Callable[[Callable[[Unpack[T2]], None]], Callable[[Unpack[T2]], None]]:
     def decorator(test_func: Callable[..., None]) -> Callable[..., None]:
         test_session.register_test_instance(test_func, params)
         return test_func
@@ -328,7 +332,11 @@ def test(*params: Unpack[T2]) -> Callable[[Callable[..., None]], Callable[..., N
     return decorator
 
 
-def fixture(*params: Unpack[T2], scope: FixtureScope = "test"):
+def fixture(
+    *params: Unpack[T2], scope: FixtureScope = "test"
+) -> Callable[
+    [Callable[[Unpack[T2]], Generator[T]]], Callable[[Unpack[T2]], Generator[T]]
+]:
     def decorator(func: Callable[..., Generator[T]]):
         test_session.register_fixture(func, params, scope)
         return func

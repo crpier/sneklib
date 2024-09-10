@@ -94,13 +94,26 @@ def test_with_fixture():
     ), f"Expected 'fixture value', but got '{fixture_value}'"
 
 
-@fixture(1, 2, 3, scope="test")
-@fixture(3, 2, 1, scope="test")
-def my_parametrized_fixture(a: int, b: int, c: int):
-    yield a + b * c
+@fixture(1, 2, scope="test")
+@fixture(3, 2, scope="test")
+def my_parametrized_fixture(a: int, b: int):
+    yield a + b
+
+
+@fixture(1, scope="test")
+@fixture(2, scope="test")
+def second_parametrized_fixture(multiplier: int):
+    yield multiplier
 
 
 @test()
 def test_with_parametrized_fixture():
     result = load_fixture(my_parametrized_fixture)
     assert result // 2 != 0
+
+
+@test()
+def test_with_2_parametrized_fixtures():
+    result = load_fixture(my_parametrized_fixture)
+    result_2 = load_fixture(second_parametrized_fixture)
+    assert result != result_2
