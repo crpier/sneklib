@@ -95,12 +95,12 @@ def test_with_fixture():
 
 
 @fixture(1, 2, scope="test")
-@fixture(3, 2, scope="test")
+@fixture(1, 0, scope="test")
 def my_parametrized_fixture(a: int, b: int):
     yield a + b
 
 
-@fixture(1, scope="test")
+@fixture(4, scope="test")
 @fixture(2, scope="test")
 def second_parametrized_fixture(multiplier: int):
     yield multiplier

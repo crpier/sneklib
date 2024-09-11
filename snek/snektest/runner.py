@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from typing import (
     Any,
     Callable,
+    Iterable,
     Iterator,
     Literal,
-    NamedTuple,
     ParamSpec,
     Tuple,
     TypeVar,
@@ -59,20 +59,8 @@ class RegisteredFixture:
         else:
             self.fixture_params.append(fixture_param)
 
-    def next_params(self) -> tuple[Any] | None:
-        if self.fixture_params is None:
-            return None
-        self._params_idx += 1
-        # try:
-        return self.fixture_params[self._params_idx - 1]
-        # except IndexError as e:
-        #     __import__('pdb').set_trace()
-        #     print(e)
 
-    def reset_params_idx(self) -> tuple[Any] | None:
-        self._params_idx = 0
-
-
+# TODO: somehow make this read only after we're done registering
 class RegisteredFixturesContainer:
     def __init__(self):
         self._registered_fixtures: dict[Callable, RegisteredFixture] = {}
@@ -91,12 +79,11 @@ class RegisteredFixturesContainer:
         else:
             self._registered_fixtures[func].register_params(fixture_param)
 
+    def __iter__(self) -> Iterator[RegisteredFixture]:
+        return iter(self._registered_fixtures.values())
+
     def get_by_function(self, func: Callable) -> RegisteredFixture | None:
         return self._registered_fixtures.get(func)
-
-    def reset_param_indexes(self):
-        for fixture in self._registered_fixtures.values():
-            fixture.reset_params_idx()
 
 
 @dataclass
@@ -191,10 +178,105 @@ def random_string(length: int) -> str:
     return "".join(random.choices(string.ascii_letters + string.digits, k=length))
 
 
-class StartedFixture(NamedTuple):
-    fixture_name: str
-    generator: Generator
+class LoadedFixture:
+    fixture_func: Callable
+    generator: Generator | None
+    # TODO: do I use this anywhere anymore?
     last_result: Any
+    params: list[tuple[Any]]
+
+    def __init__(self, fixture_func: Callable, params: list[tuple[Any]]):
+        self.fixture_func = fixture_func
+        self.generator = None
+        self.last_result = None
+        self.params = params
+        self._params_idx = -1
+
+    def next_params(self) -> tuple[Any]:
+        if len(self.params) == 0:
+            return tuple()
+        else:
+            self._params_idx += 1
+            if self._params_idx > len(self.params):
+                # We should peek before trying to load more params
+                raise ValueError("Tried to load more params than there are")
+            return self.params[self._params_idx]
+
+    def has_next_param(self) -> bool:
+        if len(self.params) == 0:
+            return False
+        else:
+            if self._params_idx + 1 >= len(self.params):
+                return False
+            return True
+
+
+class LoadedFixturesContainer:
+    def __init__(self, fixtures: Iterable[RegisteredFixture]):
+        self.preloaded_fixtures = self._preload_fixtures(fixtures)
+        self._can_generate_new_value = True
+        self._has_next_param = False
+
+    def __contains__(self, fixture_func: Callable) -> bool:
+        return fixture_func in self.preloaded_fixtures
+
+    def teardown_fixtures(self, test_name: str) -> str:
+        message = ""
+        for fixture in self.preloaded_fixtures.values():
+            try:
+                if fixture.generator is not None:
+                    next(fixture.generator)
+                raise ValueError(
+                    f"Fixture {fixture.fixture_func} for test {test_name} has more than one 'yield'"
+                )
+            except StopIteration:
+                pass
+            except Exception:
+                message += f"Unexpected error tearing down fixture {fixture.fixture_func} for test {test_name}: \n{traceback.format_exc()}\n"
+        return message
+
+    # TODO: preload fixtures lazily
+    def _preload_fixtures(
+        self, fixtures: Iterable[RegisteredFixture]
+    ) -> dict[Callable, LoadedFixture]:
+        preloaded_fixtures: dict[Callable, LoadedFixture] = {}
+        for fixture_data in fixtures:
+            if fixture_data.function in preloaded_fixtures:
+                raise ValueError(
+                    f"Fixture {fixture_data.name} has already been preloaded"
+                )
+
+            preloaded_fixtures[fixture_data.function] = LoadedFixture(
+                fixture_func=fixture_data.function,
+                params=fixture_data.fixture_params,
+            )
+        return preloaded_fixtures
+
+    def get_loaded_fixture_by_function_strict(self, func: Callable) -> LoadedFixture:
+        return self.preloaded_fixtures[func]
+
+    def load_fixture(self, fixture_func: Callable[..., Generator[T]]) -> T:
+        fixture = self.get_loaded_fixture_by_function_strict(fixture_func)
+        if fixture.generator is None:
+            fixture.generator = fixture_func(*fixture.next_params())
+            self._can_generate_new_value = False
+        elif self._can_generate_new_value:
+            if fixture.has_next_param():
+                fixture.generator = fixture_func(*fixture.next_params())
+                self._can_generate_new_value = False
+            else:
+                return fixture.last_result
+        else:
+            # generator is not None (this isn't the first load for this fixture)
+            # and we can't generate a new value
+            if fixture.has_next_param():
+                self._has_next_param = True
+            return fixture.last_result
+
+        if fixture.has_next_param():
+            self._has_next_param = True
+        fixture.last_result = next(fixture.generator)
+        return fixture.last_result
 
 
 class TestRunner:
@@ -210,106 +292,102 @@ class TestRunner:
         self.test_params = test_params
         self.fixture_params = []
         self.test_name = test_name
-        self.started_up_fixtures: dict[Callable, StartedFixture] = {}
+        """Fixtures that have been loaded for this test.
+        This test includes all variations of the test generated by 
+        having multiple test params and multiple fixture params.
+        This means that a fixture can be loaded multiple times
+        during the lifetime of this class."""
         self.fixture_param_repeats = 1
-
-    def load_fixture(self, fixture_func: Callable[..., Generator[T]]) -> T:
-        if fixture_func in self.started_up_fixtures:
-            return self.started_up_fixtures[fixture_func].last_result
-
-        fixture_data = self.fixtures.get_by_function(fixture_func)
-        if fixture_data is None:
-            raise ValueError(
-                f"Could not load fixture {fixture_func.__name__}: fixture not registered"
-            )
-        caller = self.get_load_fixture_caller()
-        if caller is None:
-            raise ValueError(f"Could not find test for fixture {fixture_func.__name__}")
-
-        fixture_params = fixture_data.next_params()
-        if len(fixture_data.fixture_params) - fixture_data._params_idx > 0:
-            self.fixture_param_repeats += 1
-
-        if fixture_params is None:
-            generator = fixture_func()
-        else:
-            generator = fixture_func(*fixture_params)
-
-        result = next(generator)
-        self.started_up_fixtures[fixture_func] = StartedFixture(
-            fixture_name=fixture_func.__name__, generator=generator, last_result=result
-        )
-
-        return result
 
     def run_test(self) -> list[Tuple[TestStatus, str]]:
         results: list[Tuple[TestStatus, str]] = []
-        if len(self.test_params) == 0:
-            while self.fixture_param_repeats > 0:
-                self.fixture_param_repeats -= 1
-                results.append(self.run_test_instance(self.test_func, tuple()))
-            self.fixtures.reset_param_indexes()
-        else:
-            for params in self.test_params:
-                for _ in range(self.fixture_param_repeats):
-                    results.append(self.run_test_instance(self.test_func, params))
-                self.fixtures.reset_param_indexes()
+        for test_params in self.test_params or [tuple()]:
+            loaded_fixtures = LoadedFixturesContainer(self.fixtures)
+            global test_instance_runner
+            test_instance_runner = TestInstanceRunner(
+                loaded_fixtures=loaded_fixtures,
+                test_func=self.test_func,
+                test_params=test_params,
+                test_name=self.test_name,
+            )
+            result = test_instance_runner.run_test_instance()
+            results.extend(result)
+            test_instance_runner = None
         return results
 
-    def run_test_instance(
-        self, test_func: Callable, test_params: tuple[Any]
-    ) -> Tuple[TestStatus, str]:
-        # TODO: only print this when -v is passed
-        try:
-            test_func(*test_params)
-            status, message = TestStatus.passed, "Test passed"
-        except AssertionError:
-            status, message = TestStatus.failed, traceback.format_exc()
-        except Exception:
-            status, message = (
-                TestStatus.failed,
-                f"Unexpected error: {traceback.format_exc()}",
-            )
-        pretty_started_up_fixtures = [
-            f"{func.__name__}={started_fixture.last_result}"
-            for func, started_fixture in self.started_up_fixtures.items()
-        ]
-        pretty_started_up_fixtures = ", ".join(pretty_started_up_fixtures)
-        if test_params == ():
-            print(
-                f"{self.test_name} with {pretty_started_up_fixtures or "no fixtures"}"
-            )
-        else:
-            print(
-                f"{self.test_name} on {test_params} with {pretty_started_up_fixtures or "no fixtures"}"
-            )
-        message += self._teardown_test_fixtures(self.test_name)
-        return status, message
 
-    def _teardown_test_fixtures(self, test_name: str) -> str:
-        message = ""
-        for fixture in self.started_up_fixtures.values():
+class TestInstanceRunner:
+    def __init__(
+        self,
+        loaded_fixtures: LoadedFixturesContainer,
+        test_func: Callable,
+        test_params: tuple[Any],
+        test_name: str,
+    ):
+        # TODO: maybe create the LoadedFixturesContainer here
+        self.loaded_fixtures = loaded_fixtures
+        self.test_func = test_func
+        self.test_params = test_params
+        self.test_name = test_name
+        self.can_run_again = True
+
+    def run_test_instance(self) -> list[Tuple[TestStatus, str]]:
+        results: list[Tuple[TestStatus, str]] = []
+        while self.can_run_again:
+            # TODO: only print this when -v is passed
             try:
-                next(fixture.generator)
-                raise ValueError(
-                    f"Fixture {fixture.fixture_name} for test {test_name} has more than one 'yield'"
-                )
-            except StopIteration:
-                pass
+                self.test_func(*self.test_params)
+                # TODO: kind of dislike using TestStatus in this class
+                # is there a nice way to not have to use it?
+                status, message = TestStatus.passed, "Test passed"
+            except AssertionError:
+                status, message = TestStatus.failed, traceback.format_exc()
             except Exception:
-                message += f"Unexpected error tearing down fixture {fixture.fixture_name} for test {test_name}: \n{traceback.format_exc()}\n"
-        self.started_up_fixtures.clear()
+                status, message = (
+                    TestStatus.failed,
+                    f"Unexpected error: {traceback.format_exc()}",
+                )
+            pretty_started_up_fixtures = [
+                f"{func.__name__}={started_fixture.last_result}"
+                # TODO: refactor so we don't access private member
+                for func, started_fixture in self.loaded_fixtures.preloaded_fixtures.items()
+                if started_fixture.generator is not None
+            ]
+            pretty_started_up_fixtures = ", ".join(pretty_started_up_fixtures)
+            if self.test_params == ():
+                print(
+                    f"{self.test_name} with {pretty_started_up_fixtures or "no fixtures"}"
+                )
+            else:
+                print(
+                    f"{self.test_name} on {self.test_params} with {pretty_started_up_fixtures or "no fixtures"}"
+                )
+            message += self.after_test_instance(self.test_name)
+            results.append((status, message))
+        return results
+
+    def load_fixture(self, fixture_func: Callable[..., Generator[T]]) -> T:
+        # TODO: decide on a more general level: look before you leap or try/except
+        if fixture_func not in self.loaded_fixtures:
+            raise ValueError(
+                f"Could not load fixture {fixture_func.__name__}: fixture not registered"
+            )
+
+        return self.loaded_fixtures.load_fixture(fixture_func)
+
+    def after_test_instance(self, test_name: str) -> str:
+        self.can_run_again = False
+        message = self.loaded_fixtures.teardown_fixtures(test_name)
+        if self.loaded_fixtures._has_next_param:
+            self.loaded_fixtures._has_next_param = False
+            self.loaded_fixtures._can_generate_new_value = True
+            self.can_run_again = True
         return message
 
-    def get_load_fixture_caller(self) -> str | None:
-        for idx, frame in enumerate(traceback.extract_stack()):
-            if frame.name == load_fixture.__name__:
-                return traceback.extract_stack()[idx - 1].name
-        return None
 
-
-test_runner: TestRunner | None = None
 test_session = TestSession()
+test_runner: TestRunner | None = None
+test_instance_runner: TestInstanceRunner | None = None
 
 ### PUBLIC API ###
 
@@ -317,9 +395,9 @@ test_session = TestSession()
 # TODO: if a certain env var set by the runner is not present,
 # these functions should be noops
 def load_fixture(fixture: Callable[..., _Generator[T, None, None]]) -> T:
-    if test_runner is None:
+    if test_instance_runner is None:
         raise ValueError("load_fixture can only be used inside a test")
-    return test_runner.load_fixture(fixture)
+    return test_instance_runner.load_fixture(fixture)
 
 
 def test(
