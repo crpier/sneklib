@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import (
     Any,
     Callable,
-    Iterable,
     Iterator,
     Literal,
     ParamSpec,
@@ -85,6 +84,9 @@ class RegisteredFixturesContainer:
     def get_by_function(self, func: Callable) -> RegisteredFixture | None:
         return self._registered_fixtures.get(func)
 
+    def get_by_function_strict(self, func: Callable) -> RegisteredFixture:
+        return self._registered_fixtures[func]
+
 
 @dataclass
 class RegisteredTest:
@@ -153,6 +155,7 @@ class TestSession:
         if tests is None:
             tests_to_run = self.tests
         else:
+            # TODO: decide on a more general level: look before you leap or try/except
             tests_to_run = [self.tests.get_by_function_strict(func) for func in tests]
 
         for test in tests_to_run:
@@ -191,6 +194,7 @@ class LoadedFixture:
         self.last_result = None
         self.params = params
         self._params_idx = -1
+        self._can_reset_params = False
 
     def next_params(self) -> tuple[Any]:
         if len(self.params) == 0:
@@ -210,10 +214,23 @@ class LoadedFixture:
                 return False
             return True
 
+    def reset_params(self) -> None:
+        self._params_idx = -1
+        self._can_reset_params = False
+        self.generator = None
+        self.last_result = None
+
+    def set_can_reset_params(self, can_reset_params: bool) -> None:
+        self._can_reset_params = can_reset_params
+
+    def can_reset_params(self) -> bool:
+        return self._can_reset_params
+
 
 class LoadedFixturesContainer:
-    def __init__(self, fixtures: Iterable[RegisteredFixture]):
-        self.preloaded_fixtures = self._preload_fixtures(fixtures)
+    def __init__(self, registered_fixtures: RegisteredFixturesContainer):
+        self.registered_fixtures = registered_fixtures
+        self.preloaded_fixtures: dict[Callable, LoadedFixture] = {}
         self._can_generate_new_value = True
         self._has_next_param = False
 
@@ -236,27 +253,54 @@ class LoadedFixturesContainer:
         return message
 
     # TODO: preload fixtures lazily
-    def _preload_fixtures(
-        self, fixtures: Iterable[RegisteredFixture]
-    ) -> dict[Callable, LoadedFixture]:
-        preloaded_fixtures: dict[Callable, LoadedFixture] = {}
-        for fixture_data in fixtures:
-            if fixture_data.function in preloaded_fixtures:
-                raise ValueError(
-                    f"Fixture {fixture_data.name} has already been preloaded"
-                )
+    def _preload_fixture(self, fixture_data: RegisteredFixture) -> None:
+        if fixture_data.function in self.preloaded_fixtures:
+            raise ValueError(f"Fixture {fixture_data.name} has already been preloaded")
 
-            preloaded_fixtures[fixture_data.function] = LoadedFixture(
-                fixture_func=fixture_data.function,
-                params=fixture_data.fixture_params,
-            )
-        return preloaded_fixtures
+        self.preloaded_fixtures[fixture_data.function] = LoadedFixture(
+            fixture_func=fixture_data.function,
+            params=fixture_data.fixture_params,
+        )
+
+    @property
+    def loaded_fixtures(self) -> dict[Callable, LoadedFixture]:
+        return {
+            func: fixture
+            for func, fixture in self.preloaded_fixtures.items()
+            if fixture.generator is not None
+        }
+
+    def can_reset_params(self, fixture_func: Callable) -> bool:
+        for fixture in self.loaded_fixtures.values():
+            if fixture.fixture_func is fixture_func:
+                continue
+            if fixture.has_next_param():
+                return True
+        return False
+
+    def get_loaded_fixture_by_function(self, func: Callable) -> LoadedFixture | None:
+        return self.preloaded_fixtures.get(func)
 
     def get_loaded_fixture_by_function_strict(self, func: Callable) -> LoadedFixture:
         return self.preloaded_fixtures[func]
 
+    def next_loaded_fixture(self, fixture_func: Callable) -> LoadedFixture | None:
+        # TODO: this is so wasteful
+        try:
+            fixture_index = list(self.loaded_fixtures.keys()).index(fixture_func)
+            next_fixture_func = list(self.loaded_fixtures.keys())[fixture_index + 1]
+            return self.loaded_fixtures[next_fixture_func]
+        except IndexError:
+            return None
+
     def load_fixture(self, fixture_func: Callable[..., Generator[T]]) -> T:
-        fixture = self.get_loaded_fixture_by_function_strict(fixture_func)
+        fixture = self.get_loaded_fixture_by_function(fixture_func)
+        if fixture is None:
+            self._preload_fixture(
+                self.registered_fixtures.get_by_function_strict(fixture_func)
+            )
+            fixture = self.get_loaded_fixture_by_function_strict(fixture_func)
+
         if fixture.generator is None:
             fixture.generator = fixture_func(*fixture.next_params())
             self._can_generate_new_value = False
@@ -265,7 +309,11 @@ class LoadedFixturesContainer:
                 fixture.generator = fixture_func(*fixture.next_params())
                 self._can_generate_new_value = False
             else:
-                return fixture.last_result
+                if fixture.can_reset_params():
+                    fixture.reset_params()
+                    fixture.generator = fixture_func(*fixture.next_params())
+                else:
+                    return fixture.last_result
         else:
             # generator is not None (this isn't the first load for this fixture)
             # and we can't generate a new value
@@ -275,6 +323,11 @@ class LoadedFixturesContainer:
 
         if fixture.has_next_param():
             self._has_next_param = True
+        else:
+            if (
+                next_fixture := self.next_loaded_fixture(fixture_func)
+            ) is not None and next_fixture.has_next_param():
+                fixture.set_can_reset_params(True)
         fixture.last_result = next(fixture.generator)
         return fixture.last_result
 
@@ -302,6 +355,8 @@ class TestRunner:
     def run_test(self) -> list[Tuple[TestStatus, str]]:
         results: list[Tuple[TestStatus, str]] = []
         for test_params in self.test_params or [tuple()]:
+            # TODO: instead of passing RegisteredFixturesContainer all around the file,
+            # maybe use a global variable?
             loaded_fixtures = LoadedFixturesContainer(self.fixtures)
             global test_instance_runner
             test_instance_runner = TestInstanceRunner(
@@ -367,12 +422,6 @@ class TestInstanceRunner:
         return results
 
     def load_fixture(self, fixture_func: Callable[..., Generator[T]]) -> T:
-        # TODO: decide on a more general level: look before you leap or try/except
-        if fixture_func not in self.loaded_fixtures:
-            raise ValueError(
-                f"Could not load fixture {fixture_func.__name__}: fixture not registered"
-            )
-
         return self.loaded_fixtures.load_fixture(fixture_func)
 
     def after_test_instance(self, test_name: str) -> str:
