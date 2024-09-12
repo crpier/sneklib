@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from enum import StrEnum, auto
 
+# TODO: I think presentation should import results, not the other way around
 from snek.snektest.presentation import Colors, pad_string_to_screen_width
 
 

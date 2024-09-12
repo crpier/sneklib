@@ -1,10 +1,17 @@
 from argparse import ArgumentParser
 from importlib import import_module
+
 from snek.snektest.runner import test_session
 
 if __name__ == "__main__":
     parser = ArgumentParser()
-    parser.add_argument("import_path")
+    parser.add_argument("import_path", help="Import path to the test")
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Show additional output during test runs",
+    )
     args = parser.parse_args()
     module_part = args.import_path
     rest = ""
@@ -23,10 +30,10 @@ if __name__ == "__main__":
         exit(1)
 
     if rest == "":
-        test_session.run_tests()
+        test_session.run_tests(verbose=args.verbose)
     else:
         target = getattr(module, rest)
         match target:
             # if it's a function:
             case callable:
-                test_session.run_tests([target])
+                test_session.run_tests([target], verbose=args.verbose)

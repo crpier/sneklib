@@ -43,6 +43,7 @@ def root_fixture_is_started_up():
     assert root_fixture_started_up is True
 
 
+# TODO: this test is not working correctly when ran on its own lol
 @test()
 def root_fixture_is_torn_down():
     assert root_fixture_torn_down is True

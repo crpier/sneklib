@@ -15,6 +15,7 @@ from typing import (
     Unpack,
 )
 
+from snek.snektest.presentation import Output
 from snek.snektest.results import TestResult, TestStatus, show_results
 
 T = TypeVar("T")
@@ -150,13 +151,17 @@ class TestSession:
     ):
         self.fixtures.register_fixture(func, fixture_params, scope)
 
-    def run_tests(self, tests: list[Callable] | None = None) -> None:
+    def run_tests(
+        self, tests: list[Callable] | None = None, verbose: bool = False
+    ) -> None:
         test_results: dict[str, TestResult] = {}
         if tests is None:
             tests_to_run = self.tests
         else:
             # TODO: decide on a more general level: look before you leap or try/except
             tests_to_run = [self.tests.get_by_function_strict(func) for func in tests]
+        global output
+        output = Output(verbose)
 
         for test in tests_to_run:
             global test_runner
@@ -389,7 +394,6 @@ class TestInstanceRunner:
     def run_test_instance(self) -> list[Tuple[TestStatus, str]]:
         results: list[Tuple[TestStatus, str]] = []
         while self.can_run_again:
-            # TODO: only print this when -v is passed
             try:
                 self.test_func(*self.test_params)
                 # TODO: kind of dislike using TestStatus in this class
@@ -402,21 +406,17 @@ class TestInstanceRunner:
                     TestStatus.failed,
                     f"Unexpected error: {traceback.format_exc()}",
                 )
-            pretty_started_up_fixtures = [
-                f"{func.__name__}={started_fixture.last_result}"
-                # TODO: refactor so we don't access private member
-                for func, started_fixture in self.loaded_fixtures.preloaded_fixtures.items()
-                if started_fixture.generator is not None
-            ]
-            pretty_started_up_fixtures = ", ".join(pretty_started_up_fixtures)
-            if self.test_params == ():
-                print(
-                    f"{self.test_name} with {pretty_started_up_fixtures or "no fixtures"}"
-                )
-            else:
-                print(
-                    f"{self.test_name} on {self.test_params} with {pretty_started_up_fixtures or "no fixtures"}"
-                )
+            if output is None:
+                raise ValueError("Output is not set")
+            output.print_test_output(
+                test_name=self.test_name,
+                test_params=self.test_params,
+                test_status=status,
+                fixtures={
+                    fixture.fixture_func.__name__: fixture.last_result
+                    for fixture in self.loaded_fixtures.loaded_fixtures.values()
+                },
+            )
             message += self.after_test_instance(self.test_name)
             results.append((status, message))
         return results
@@ -437,6 +437,7 @@ class TestInstanceRunner:
 test_session = TestSession()
 test_runner: TestRunner | None = None
 test_instance_runner: TestInstanceRunner | None = None
+output: Output | None = None
 
 ### PUBLIC API ###
 

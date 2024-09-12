@@ -1,5 +1,6 @@
+import sys
 from shutil import get_terminal_size
-from typing import Mapping
+from typing import Any, Mapping
 
 from colorama import Fore
 
@@ -13,14 +14,17 @@ class ColoredString(str):
         super().__init__()
 
 
+IS_TTY = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+
+
 # Color definitions using colorama
 class Colors:
-    RESET = Fore.RESET
-    RED = Fore.RED
-    GREEN = Fore.GREEN
-    YELLOW = Fore.YELLOW
-    BLUE = Fore.BLUE
-    BLUE = Fore.BLUE
+    RESET = Fore.RESET if IS_TTY else ""
+    RED = Fore.RED if IS_TTY else ""
+    GREEN = Fore.GREEN if IS_TTY else ""
+    YELLOW = Fore.YELLOW if IS_TTY else ""
+    BLUE = Fore.BLUE if IS_TTY else ""
+    BLUE = Fore.BLUE if IS_TTY else ""
 
     @classmethod
     def get_colors(cls) -> list[str]:
@@ -38,7 +42,7 @@ class Colors:
         return text
 
     @classmethod
-    def add_color(cls, text: str, color: str) -> str:
+    def apply_color(cls, text: str, color: str) -> str:
         return f"{color}{text}{cls.RESET}"
 
     @classmethod
@@ -48,11 +52,39 @@ class Colors:
         result_list = []
         original_length = 0
         for substring, color in color_map.items():
-            colored_substring = cls.add_color(substring, color) if color else substring
+            colored_substring = (
+                cls.apply_color(substring, color) if color else substring
+            )
             result_list.append(colored_substring)
             original_length += len(substring)
         result = ColoredString("".join(result_list), original_length)
         return result
+
+
+class Output:
+    def __init__(self, verbose: bool):
+        self.verbose = verbose
+
+    def print_test_output(
+        self,
+        test_name: str,
+        test_params: tuple[Any],
+        test_status: str,
+        fixtures: dict[str, str],
+    ) -> None:
+        if self.verbose:
+            test_status_str = Colors.apply_color(test_status, Colors.GREEN)
+            if len(fixtures) == 0:
+                fixtures_str = ""
+            else:
+                fixtures_str = " with: " + ", ".join(
+                    [f"{name}={value}" for name, value in fixtures.items()]
+                )
+            if test_params == ():
+                test_params_str = ""
+            else:
+                test_params_str = f" on {test_params}"
+            print(f"{test_name}{test_params_str}{fixtures_str} {test_status_str}")
 
 
 def pad_string_to_screen_width(summary: ColoredString, pad_char: str = "-") -> str:

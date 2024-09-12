@@ -25,7 +25,7 @@ def test_remove_color_codes_no_colors():
 def test_add_color():
     text = "This text has no color codes"
     assert (
-        Colors.add_color(text, Colors.RED) == f"{Colors.RED}{text}{Colors.RESET}"
+        Colors.apply_color(text, Colors.RED) == f"{Colors.RED}{text}{Colors.RESET}"
     ), "Color codes were not added correctly"
 
 
