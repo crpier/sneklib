@@ -1,10 +1,15 @@
 import random
 import string
 import traceback
+from asyncio import iscoroutinefunction
+from collections.abc import AsyncGenerator as _AsyncGenerator
+from collections.abc import Coroutine
 from collections.abc import Generator as _Generator
 from dataclasses import dataclass
+from inspect import isasyncgen
 from typing import (
     Any,
+    Awaitable,
     Callable,
     Iterator,
     Literal,
@@ -22,6 +27,7 @@ T = TypeVar("T")
 T2 = TypeVarTuple("T2")
 P = ParamSpec("P")
 Generator = _Generator[T, None, None]
+AsyncGenerator = _AsyncGenerator[T, None]
 
 
 FixtureScope = Literal["test", "session"]
@@ -151,7 +157,7 @@ class TestSession:
     ):
         self.fixtures.register_fixture(func, fixture_params, scope)
 
-    def run_tests(
+    async def run_tests(
         self, tests: list[Callable] | None = None, verbose: bool = False
     ) -> None:
         test_results: dict[str, TestResult] = {}
@@ -171,7 +177,7 @@ class TestSession:
                 test_params=test.test_params,
                 test_name=test.test_name,
             )
-            results = test_runner.run_test()
+            results = await test_runner.run_test()
             # TODO: this should also contain test params and fixture params
             for status, message in results:
                 test_results[test.test_name + random_string(5)] = TestResult(
@@ -188,7 +194,7 @@ def random_string(length: int) -> str:
 
 class LoadedFixture:
     fixture_func: Callable
-    generator: Generator | None
+    generator: Generator | AsyncGenerator | None
     # TODO: do I use this anywhere anymore?
     last_result: Any
     params: list[tuple[Any]]
@@ -242,12 +248,15 @@ class LoadedFixturesContainer:
     def __contains__(self, fixture_func: Callable) -> bool:
         return fixture_func in self.preloaded_fixtures
 
-    def teardown_fixtures(self, test_name: str) -> str:
+    async def teardown_fixtures(self, test_name: str) -> str:
         message = ""
         for fixture in self.preloaded_fixtures.values():
             try:
                 if fixture.generator is not None:
-                    next(fixture.generator)
+                    if isasyncgen(fixture.generator):
+                        await anext(fixture.generator)
+                    else:
+                        next(fixture.generator)
                 raise ValueError(
                     f"Fixture {fixture.fixture_func} for test {test_name} has more than one 'yield'"
                 )
@@ -336,6 +345,49 @@ class LoadedFixturesContainer:
         fixture.last_result = next(fixture.generator)
         return fixture.last_result
 
+    async def load_fixture_async(
+        self, fixture_func: Callable[..., AsyncGenerator[T]]
+    ) -> T:
+        fixture = self.get_loaded_fixture_by_function(fixture_func)
+        if fixture is None:
+            self._preload_fixture(
+                self.registered_fixtures.get_by_function_strict(fixture_func)
+            )
+            fixture = self.get_loaded_fixture_by_function_strict(fixture_func)
+
+        if fixture.generator is None:
+            fixture.generator = fixture_func(*fixture.next_params())
+            self._can_generate_new_value = False
+        elif self._can_generate_new_value:
+            if fixture.has_next_param():
+                fixture.generator = fixture_func(*fixture.next_params())
+                self._can_generate_new_value = False
+            else:
+                if fixture.can_reset_params():
+                    fixture.reset_params()
+                    fixture.generator = fixture_func(*fixture.next_params())
+                else:
+                    return fixture.last_result
+        else:
+            # generator is not None (this isn't the first load for this fixture)
+            # and we can't generate a new value
+            if fixture.has_next_param():
+                self._has_next_param = True
+            return fixture.last_result
+
+        if fixture.has_next_param():
+            self._has_next_param = True
+        else:
+            if (
+                next_fixture := self.next_loaded_fixture(fixture_func)
+            ) is not None and next_fixture.has_next_param():
+                fixture.set_can_reset_params(True)
+        if isasyncgen(fixture.generator):
+            fixture.last_result = await anext(fixture.generator)
+        else:
+            fixture.last_result = next(fixture.generator)
+        return fixture.last_result
+
 
 class TestRunner:
     def __init__(
@@ -357,7 +409,7 @@ class TestRunner:
         during the lifetime of this class."""
         self.fixture_param_repeats = 1
 
-    def run_test(self) -> list[Tuple[TestStatus, str]]:
+    async def run_test(self) -> list[Tuple[TestStatus, str]]:
         results: list[Tuple[TestStatus, str]] = []
         for test_params in self.test_params or [tuple()]:
             # TODO: instead of passing RegisteredFixturesContainer all around the file,
@@ -370,7 +422,7 @@ class TestRunner:
                 test_params=test_params,
                 test_name=self.test_name,
             )
-            result = test_instance_runner.run_test_instance()
+            result = await test_instance_runner.run_test_instance()
             results.extend(result)
             test_instance_runner = None
         return results
@@ -391,11 +443,14 @@ class TestInstanceRunner:
         self.test_name = test_name
         self.can_run_again = True
 
-    def run_test_instance(self) -> list[Tuple[TestStatus, str]]:
+    async def run_test_instance(self) -> list[Tuple[TestStatus, str]]:
         results: list[Tuple[TestStatus, str]] = []
         while self.can_run_again:
             try:
-                self.test_func(*self.test_params)
+                if iscoroutinefunction(self.test_func):
+                    await self.test_func(*self.test_params)
+                else:
+                    self.test_func(*self.test_params)
                 # TODO: kind of dislike using TestStatus in this class
                 # is there a nice way to not have to use it?
                 status, message = TestStatus.passed, "Test passed"
@@ -417,16 +472,21 @@ class TestInstanceRunner:
                     for fixture in self.loaded_fixtures.loaded_fixtures.values()
                 },
             )
-            message += self.after_test_instance(self.test_name)
+            message += await self.after_test_instance(self.test_name)
             results.append((status, message))
         return results
 
     def load_fixture(self, fixture_func: Callable[..., Generator[T]]) -> T:
         return self.loaded_fixtures.load_fixture(fixture_func)
 
-    def after_test_instance(self, test_name: str) -> str:
+    async def load_fixture_async(
+        self, fixture_func: Callable[..., AsyncGenerator[T]]
+    ) -> T:
+        return await self.loaded_fixtures.load_fixture_async(fixture_func)
+
+    async def after_test_instance(self, test_name: str) -> str:
         self.can_run_again = False
-        message = self.loaded_fixtures.teardown_fixtures(test_name)
+        message = await self.loaded_fixtures.teardown_fixtures(test_name)
         if self.loaded_fixtures._has_next_param:
             self.loaded_fixtures._has_next_param = False
             self.loaded_fixtures._can_generate_new_value = True
@@ -450,10 +510,26 @@ def load_fixture(fixture: Callable[..., _Generator[T, None, None]]) -> T:
     return test_instance_runner.load_fixture(fixture)
 
 
+async def load_fixture_async(fixture: Callable[..., AsyncGenerator[T]]) -> T:
+    if test_instance_runner is None:
+        raise ValueError("load_fixture can only be used inside a test")
+    return await test_instance_runner.load_fixture_async(fixture)
+
+
 def test(
     *params: Unpack[T2],
 ) -> Callable[[Callable[[Unpack[T2]], None]], Callable[[Unpack[T2]], None]]:
     def decorator(test_func: Callable[..., None]) -> Callable[..., None]:
+        test_session.register_test_instance(test_func, params)
+        return test_func
+
+    return decorator
+
+
+def test_async(
+    *params: Unpack[T2],
+) -> Callable[[Callable[[Unpack[T2]], Awaitable[None]]], Callable[[Unpack[T2]], None]]:
+    def decorator(test_func: Callable[..., Coroutine]) -> Callable[..., None]:
         test_session.register_test_instance(test_func, params)
         return test_func
 
@@ -466,6 +542,19 @@ def fixture(
     [Callable[[Unpack[T2]], Generator[T]]], Callable[[Unpack[T2]], Generator[T]]
 ]:
     def decorator(func: Callable[..., Generator[T]]):
+        test_session.register_fixture(func, params, scope)
+        return func
+
+    return decorator
+
+
+def async_fixture(
+    *params: Unpack[T2], scope: FixtureScope = "test"
+) -> Callable[
+    [Callable[[Unpack[T2]], AsyncGenerator[T]]],
+    Callable[[Unpack[T2]], AsyncGenerator[T]],
+]:
+    def decorator(func: Callable[..., AsyncGenerator[T]]):
         test_session.register_fixture(func, params, scope)
         return func
 
